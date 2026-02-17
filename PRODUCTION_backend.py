@@ -167,9 +167,14 @@ def upload_pdf():
             "brand": brand_data["name"]
         })
     except Exception as e:
-        if job_dir.exists():
-            shutil.rmtree(job_dir)
-        return jsonify({"error": str(e)}), 500
+    import traceback
+    error_details = traceback.format_exc()
+    print(f"❌ ERROR GENERATING VIDEO:")
+    print(error_details)
+    if job_id in jobs:
+        jobs[job_id]["status"] = "error"
+        jobs[job_id]["error"] = str(e)
+    return jsonify({"error": str(e), "details": error_details}), 500
 
 @app.route('/api/generate/<job_id>', methods=['POST'])
 def generate_video(job_id):
