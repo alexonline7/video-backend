@@ -8,7 +8,6 @@ from pathlib import Path
 import uuid
 import json
 import time
-import re
 import traceback
 import os
 import base64
@@ -22,22 +21,14 @@ jobs = {}
 
 
 def extract_from_pdf(pdf_path):
-    """
-    Extract ACTUAL embedded code from PDF metadata fields.
-    The PDF stores:
-    - /RemotionCode   -> base64 encoded JSX composition
-    - /ThreeJSCode    -> base64 encoded Three.js code  
-    - /OrchestratorCode -> base64 encoded orchestrator
-    - /Subject        -> JSON with brand data
-    """
     reader = PdfReader(pdf_path)
     info = reader.metadata
 
-    print("=== PDF METADATA KEYS ===")
+    print("=== PDF METADATA ===")
     for key in info.keys():
         print(f"  {key}: {len(str(info[key]))} chars")
 
-    # Extract brand data from Subject JSON
+    # Extract brand data
     subject = info.get('/Subject', '{}')
     try:
         metadata = json.loads(subject)
@@ -52,65 +43,97 @@ def extract_from_pdf(pdf_path):
             "accent_color": brand.get('colors', {}).get('accent', '#00C4C9'),
             "cta": marketing.get('cta', 'Learn More'),
             "instagram": social.get('instagram', ''),
-            "website": brand.get('website', ''),
         }
-    except Exception as e:
-        print(f"Subject parse error: {e}")
+    except:
         brand_data = {
             "name": "YOUR BRAND",
-            "tagline": "Your Amazing Tagline", 
+            "tagline": "Your Amazing Tagline",
             "primary_color": "#00F3F9",
             "secondary_color": "#001A33",
             "accent_color": "#00C4C9",
             "cta": "Learn More",
             "instagram": "",
-            "website": "",
         }
 
-    # Extract the ACTUAL embedded Remotion code
-    remotion_b64 = info.get('/RemotionCode', '')
+    # Extract embedded Remotion code
     remotion_code = None
+    remotion_b64 = info.get('/RemotionCode', '')
     if remotion_b64:
         try:
             remotion_code = base64.b64decode(remotion_b64).decode('utf-8')
-            print(f"✅ Extracted RemotionCode: {len(remotion_code)} chars")
+            print(f"✅ RemotionCode extracted: {len(remotion_code)} chars")
         except Exception as e:
-            print(f"RemotionCode decode error: {e}")
+            print(f"RemotionCode error: {e}")
 
-    # Extract orchestrator code
-    orch_b64 = info.get('/OrchestratorCode', '')
-    orchestrator_code = None
-    if orch_b64:
-        try:
-            orchestrator_code = base64.b64decode(orch_b64).decode('utf-8')
-            print(f"✅ Extracted OrchestratorCode: {len(orchestrator_code)} chars")
-        except Exception as e:
-            print(f"OrchestratorCode decode error: {e}")
-
-    return brand_data, remotion_code, orchestrator_code
+    return brand_data, remotion_code
 
 
-def setup_remotion_project(job_dir, brand_data, remotion_code):
+def fix_remotion_exports(code):
     """
-    Set up a complete Remotion project using the ACTUAL code from the PDF.
-    Falls back to generated code if PDF code is unavailable.
+    Fix Remotion 4.x compatibility:
+    - Replace 'export default () => (<Composition...)' 
+    - With 'export const RemotionRoot = () => (<Composition...)'
+    This is required for Remotion 4.x render command
     """
+    # Replace export default with RemotionRoot
+    if 'export default () =>' in code:
+        code = code.replace(
+            'export default () =>',
+            'export const RemotionRoot = () =>'
+        )
+        print("✅ Fixed: export default → RemotionRoot")
+    elif 'export default function' in code:
+        code = code.replace(
+            'export default function',
+            'export function RemotionRoot'
+        )
+        print("✅ Fixed: export default function → RemotionRoot")
+    
+    # If no RemotionRoot exists at all, append one
+    if 'RemotionRoot' not in code and 'Composition' in code:
+        # Extract composition id
+        import re
+        comp_match = re.search(r'id=["\'](\w+)["\']', code)
+        comp_id = comp_match.group(1) if comp_match else 'InstagramReel'
+        comp_match2 = re.search(r'component=\{(\w+)\}', code)
+        comp_component = comp_match2.group(1) if comp_match2 else 'InstagramReel'
+        
+        code += f'''
+export const RemotionRoot = () => (
+  <Composition
+    id="{comp_id}"
+    component={{{comp_component}}}
+    durationInFrames={{450}}
+    fps={{30}}
+    width={{1080}}
+    height={{1920}}
+  />
+);
+'''
+        print(f"✅ Added RemotionRoot wrapper for {comp_id}")
+    
+    return code
+
+
+def setup_project(job_dir, brand_data, remotion_code):
     src_dir = job_dir / "src"
     src_dir.mkdir(exist_ok=True)
 
-    # Use ACTUAL code from PDF if available
     if remotion_code:
-        print("🎯 Using ACTUAL embedded Remotion code from PDF!")
-        composition_code = remotion_code
+        print("🎯 Using ACTUAL embedded code from PDF!")
+        # Fix Remotion 4.x compatibility
+        fixed_code = fix_remotion_exports(remotion_code)
     else:
-        print("⚠️ No embedded code found, generating from brand data...")
-        composition_code = generate_fallback_composition(brand_data)
+        print("⚠️ Generating fallback composition...")
+        fixed_code = generate_fallback(brand_data)
 
-    # Write the composition
     with open(src_dir / "index.jsx", 'w') as f:
-        f.write(composition_code)
+        f.write(fixed_code)
 
-    # Write package.json
+    # Write remotion.config.ts
+    with open(job_dir / "remotion.config.ts", 'w') as f:
+        f.write("export default {};\n")
+
     package_json = {
         "name": "video-renderer",
         "version": "1.0.0",
@@ -128,62 +151,43 @@ def setup_remotion_project(job_dir, brand_data, remotion_code):
     with open(job_dir / "package.json", 'w') as f:
         json.dump(package_json, f, indent=2)
 
-    print(f"✅ Remotion project ready with ACTUAL PDF code")
+    print("✅ Project ready!")
     return True
 
 
-def generate_fallback_composition(brand_data):
-    """Fallback composition if PDF code extraction fails"""
+def generate_fallback(brand_data):
     return f'''import {{ Composition, useCurrentFrame, useVideoConfig, interpolate, spring, AbsoluteFill }} from 'remotion';
 import React from 'react';
 
 const BRAND = {{
   name: "{brand_data['name']}",
   tagline: "{brand_data['tagline']}",
-  colors: {{
-    primary: "{brand_data['primary_color']}",
-    secondary: "{brand_data['secondary_color']}",
-    accent: "{brand_data['accent_color']}"
-  }},
+  primary: "{brand_data['primary_color']}",
+  secondary: "{brand_data['secondary_color']}",
+  accent: "{brand_data['accent_color']}",
   cta: "{brand_data['cta']}"
 }};
 
-const InstagramReel = () => {{
+const Video = () => {{
   const frame = useCurrentFrame();
   const {{fps}} = useVideoConfig();
-  const logoSpring = spring({{frame, fps, config: {{damping: 100, stiffness: 200}}}});
-  const logoOpacity = interpolate(frame, [0, 30], [0, 1]);
+  const scale = spring({{frame, fps, config: {{damping: 100, stiffness: 200}}}});
+  const opacity = interpolate(frame, [0, 30], [0, 1]);
   const taglineOpacity = interpolate(frame, [90, 120, 240, 270], [0, 1, 1, 0]);
   const ctaOpacity = interpolate(frame, [270, 300], [0, 1]);
-  const ctaScale = 1 + Math.sin(frame * 0.1) * 0.05;
   const bgAngle = interpolate(frame, [0, 450], [0, 360]);
 
   return (
-    <AbsoluteFill style={{{{
-      background: `linear-gradient(${{bgAngle}}deg, ${{BRAND.colors.primary}} 0%, ${{BRAND.colors.secondary}} 100%)`,
-      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-    }}}}>
-      {{frame < 90 && (
-        <div style={{{{transform: `scale(${{logoSpring}})`, opacity: logoOpacity, fontSize: 100, fontWeight: 900, color: 'white', fontFamily: 'Arial Black, sans-serif', textShadow: `0 0 40px ${{BRAND.colors.accent}}`, textAlign: 'center', padding: '0 40px'}}}}>
-          {{BRAND.name}}
-        </div>
-      )}}
-      {{frame >= 90 && frame < 270 && (
-        <div style={{{{opacity: taglineOpacity, fontSize: 55, fontWeight: 700, textAlign: 'center', padding: '0 60px', color: 'white', fontFamily: 'Arial, sans-serif', lineHeight: 1.3}}}}>
-          {{BRAND.tagline}}
-        </div>
-      )}}
-      {{frame >= 270 && (
-        <div style={{{{opacity: ctaOpacity, transform: `scale(${{ctaScale}})`, fontSize: 60, fontWeight: 900, color: BRAND.colors.secondary, backgroundColor: BRAND.colors.accent, padding: '25px 70px', borderRadius: '100px', fontFamily: 'Arial Black, sans-serif', boxShadow: `0 0 40px ${{BRAND.colors.accent}}`}}}}>
-          {{BRAND.cta}}
-        </div>
-      )}}
+    <AbsoluteFill style={{{{background: `linear-gradient(${{bgAngle}}deg, ${{BRAND.primary}}, ${{BRAND.secondary}})`, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center"}}}}>
+      {{frame < 90 && <div style={{{{transform: `scale(${{scale}})`, opacity, fontSize: 100, fontWeight: 900, color: "white", fontFamily: "Arial Black", textShadow: `0 0 40px ${{BRAND.accent}}`, textAlign: "center", padding: "0 40px"}}}}>{brand_data['name']}</div>}}
+      {{frame >= 90 && frame < 270 && <div style={{{{opacity: taglineOpacity, fontSize: 55, fontWeight: 700, textAlign: "center", padding: "0 60px", color: "white", fontFamily: "Arial"}}}}>{brand_data['tagline']}</div>}}
+      {{frame >= 270 && <div style={{{{opacity: ctaOpacity, fontSize: 60, fontWeight: 900, color: BRAND.secondary, backgroundColor: BRAND.accent, padding: "25px 70px", borderRadius: "100px", fontFamily: "Arial Black"}}}}>{brand_data['cta']}</div>}}
     </AbsoluteFill>
   );
 }};
 
-export default () => (
-  <Composition id="InstagramReel" component={{InstagramReel}} durationInFrames={{450}} fps={{30}} width={{1080}} height={{1920}} />
+export const RemotionRoot = () => (
+  <Composition id="InstagramReel" component={{Video}} durationInFrames={{450}} fps={{30}} width={{1080}} height={{1920}} />
 );
 '''
 
@@ -192,21 +196,18 @@ export default () => (
 def health():
     node_ver = subprocess.run(["node", "--version"], capture_output=True, text=True)
     npm_ver = subprocess.run(["npm", "--version"], capture_output=True, text=True)
-    remotion_check = subprocess.run(["npx", "remotion", "--version"], capture_output=True, text=True)
     return jsonify({
         "status": "healthy",
-        "service": "Ultimate Video Renderer - PDF Code Extraction",
+        "service": "Ultimate Renderer v3 - RemotionRoot Fix",
         "node": node_ver.stdout.strip(),
         "npm": npm_ver.stdout.strip(),
-        "remotion": remotion_check.stdout.strip()[:50] if remotion_check.stdout else "available",
-        "features": ["PDF code extraction", "base64 decode", "actual embedded code"]
     })
 
 
 @app.route('/api/upload-pdf', methods=['POST'])
 def upload_pdf():
     if 'pdf' not in request.files:
-        return jsonify({"error": "No PDF provided"}), 400
+        return jsonify({"error": "No PDF"}), 400
 
     pdf_file = request.files['pdf']
     job_id = str(uuid.uuid4())
@@ -217,13 +218,9 @@ def upload_pdf():
     pdf_file.save(pdf_path)
 
     try:
-        print(f"\n🎬 Processing PDF: {pdf_file.filename}")
-        brand_data, remotion_code, orchestrator_code = extract_from_pdf(pdf_path)
-
-        print(f"✅ Brand: {brand_data['name']}")
-        print(f"✅ Has embedded Remotion code: {remotion_code is not None}")
-
-        setup_remotion_project(job_dir, brand_data, remotion_code)
+        print(f"\n📄 Processing: {pdf_file.filename}")
+        brand_data, remotion_code = extract_from_pdf(pdf_path)
+        setup_project(job_dir, brand_data, remotion_code)
 
         jobs[job_id] = {
             "created_at": time.time(),
@@ -231,7 +228,6 @@ def upload_pdf():
             "status": "extracted",
             "brand_data": brand_data,
             "has_embedded_code": remotion_code is not None,
-            "code_length": len(remotion_code) if remotion_code else 0
         }
 
         return jsonify({
@@ -239,41 +235,35 @@ def upload_pdf():
             "status": "extracted",
             "brand": brand_data["name"],
             "has_embedded_code": remotion_code is not None,
-            "code_length": len(remotion_code) if remotion_code else 0,
-            "message": f"Extracted {'ACTUAL embedded code' if remotion_code else 'brand data'} from PDF"
         })
 
     except Exception as e:
-        print(f"❌ Upload error: {traceback.format_exc()}")
+        print(f"❌ {traceback.format_exc()}")
         if job_dir.exists():
             shutil.rmtree(job_dir)
-        return jsonify({"error": str(e), "details": traceback.format_exc()}), 500
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/api/generate/<job_id>', methods=['POST'])
 def generate_video(job_id):
     job_dir = TEMP_DIR / job_id
-
     if not job_dir.exists():
         return jsonify({"error": "Job not found"}), 404
 
-    if job_id in jobs:
-        jobs[job_id]["status"] = "generating"
-
     try:
-        brand_name = jobs.get(job_id, {}).get('brand', 'Unknown')
+        brand_name = jobs.get(job_id, {}).get('brand', 'Brand')
         has_embedded = jobs.get(job_id, {}).get('has_embedded_code', False)
 
         print(f"\n{'='*60}")
         print(f"🎬 RENDERING: {brand_name}")
-        print(f"📦 Using: {'ACTUAL PDF embedded code' if has_embedded else 'generated fallback'}")
+        print(f"📦 Code source: {'ACTUAL PDF code' if has_embedded else 'fallback'}")
         print(f"{'='*60}")
 
         out_dir = job_dir / "out"
         out_dir.mkdir(exist_ok=True)
 
-        # Install dependencies
-        print("📦 Installing npm dependencies...")
+        # npm install
+        print("📦 npm install...")
         install = subprocess.run(
             ["npm", "install"],
             cwd=job_dir,
@@ -281,45 +271,41 @@ def generate_video(job_id):
             text=True,
             timeout=180,
         )
+        print(f"npm install exit: {install.returncode}")
+        if install.stderr:
+            print(f"npm stderr: {install.stderr[-1000:]}")
 
         if install.returncode != 0:
-            print(f"❌ npm install failed:\n{install.stderr}")
-            return jsonify({"error": "npm install failed", "details": install.stderr[-2000:]}), 500
+            return jsonify({
+                "error": "npm install failed",
+                "details": install.stderr[-2000:]
+            }), 500
 
-        print("✅ Dependencies installed!")
-        print("🎥 Starting Remotion render...")
+        print("✅ npm install done!")
 
-        # Render the video
-        env = {
-            **os.environ,
-            "REMOTION_CHROME_FLAGS": "--no-sandbox --disable-setuid-sandbox",
-        }
+        # Find chromium
+        chrome_paths = ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome"]
+        chrome_path = next((p for p in chrome_paths if Path(p).exists()), None)
+        print(f"🌐 Chrome: {chrome_path}")
 
-        # Try different chromium paths
-        chrome_paths = [
-            "/usr/bin/chromium",
-            "/usr/bin/chromium-browser",
-            "/usr/bin/google-chrome",
-        ]
-
-        chrome_path = None
-        for path in chrome_paths:
-            if Path(path).exists():
-                chrome_path = path
-                break
-
+        # Build render command
         render_cmd = [
             "npx", "remotion", "render",
             "src/index.jsx",
             "InstagramReel",
             "out/video.mp4",
             "--log=verbose",
+            "--concurrency=1",
         ]
-
         if chrome_path:
             render_cmd.append(f"--browser-executable={chrome_path}")
-            print(f"🌐 Using Chrome at: {chrome_path}")
 
+        env = {
+            **os.environ,
+            "REMOTION_CHROME_FLAGS": "--no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage",
+        }
+
+        print(f"🎥 Running: {' '.join(render_cmd)}")
         render = subprocess.run(
             render_cmd,
             cwd=job_dir,
@@ -329,63 +315,44 @@ def generate_video(job_id):
             env=env
         )
 
-        print(f"Render exit code: {render.returncode}")
-        if render.stdout:
-            print(f"Render stdout (last 2000):\n{render.stdout[-2000:]}")
-        if render.stderr:
-            print(f"Render stderr (last 2000):\n{render.stderr[-2000:]}")
+        print(f"Render exit: {render.returncode}")
+        print(f"STDOUT:\n{render.stdout[-3000:]}")
+        print(f"STDERR:\n{render.stderr[-3000:]}")
 
         if render.returncode != 0:
             return jsonify({
                 "error": "Render failed",
-                "stdout": render.stdout[-1000:],
-                "stderr": render.stderr[-1000:]
+                "stdout": render.stdout[-1500:],
+                "stderr": render.stderr[-1500:]
             }), 500
 
-        # Find generated video
         video_files = list((job_dir / "out").glob("*.mp4"))
         if not video_files:
-            return jsonify({"error": "No MP4 generated despite success exit code"}), 500
+            return jsonify({"error": "No MP4 generated"}), 500
 
-        print(f"✅ Video rendered: {[f.name for f in video_files]}")
-
-        # Package as ZIP
-        safe_brand = brand_name.replace(' ', '_').replace('/', '_')
+        safe_brand = brand_name.replace(' ', '_')
         zip_path = job_dir / f"{safe_brand}_Videos.zip"
 
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for video in video_files:
                 zipf.write(video, f"{safe_brand}_instagram_reel.mp4")
-            zipf.writestr("README.txt", f"""
-{brand_name} - AI Generated Video
-{'='*40}
-File: {safe_brand}_instagram_reel.mp4
-Format: MP4, 1080x1920 (9:16), 15 seconds, 30fps
-Technology: Remotion + React + PDF Embedded Code
-Source: ACTUAL code extracted from NextGen PDF
-
-Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}
-System: ExecPDF Next-Gen Video Renderer
-""")
+            zipf.writestr("README.txt", f"{brand_name} - Generated by ExecPDF\nRendered: {time.strftime('%Y-%m-%d %H:%M:%S')}")
 
         jobs[job_id]["status"] = "complete"
-
-        print(f"✅ ZIP ready: {zip_path.name}")
-        print(f"{'='*60}\n")
+        print(f"✅ DONE! ZIP ready.")
 
         return jsonify({
             "status": "complete",
             "download_url": f"/api/download/{job_id}",
             "brand": brand_name,
             "used_embedded_code": has_embedded,
-            "message": f"✅ MP4 rendered using {'ACTUAL embedded PDF code' if has_embedded else 'generated code'}!"
+            "message": "MP4 rendered successfully!"
         })
 
     except subprocess.TimeoutExpired:
-        print("❌ TIMEOUT")
-        return jsonify({"error": "Render timed out after 10 minutes"}), 500
+        return jsonify({"error": "Render timed out"}), 500
     except Exception as e:
-        print(f"❌ ERROR: {traceback.format_exc()}")
+        print(f"❌ {traceback.format_exc()}")
         return jsonify({"error": str(e), "details": traceback.format_exc()[-2000:]}), 500
 
 
@@ -400,24 +367,13 @@ def get_status(job_id):
 def download_video(job_id):
     job_dir = TEMP_DIR / job_id
     if not job_dir.exists():
-        return jsonify({"error": "Job not found"}), 404
-
+        return jsonify({"error": "Not found"}), 404
     zip_files = list(job_dir.glob("*_Videos.zip"))
     if not zip_files:
-        return jsonify({"error": "Video not ready yet"}), 404
-
-    return send_file(
-        zip_files[0],
-        as_attachment=True,
-        download_name=zip_files[0].name,
-        mimetype='application/zip'
-    )
+        return jsonify({"error": "Not ready"}), 404
+    return send_file(zip_files[0], as_attachment=True, download_name=zip_files[0].name)
 
 
 if __name__ == '__main__':
-    print("\n" + "="*60)
-    print("🚀 ULTIMATE VIDEO RENDERER - PDF CODE EXTRACTION EDITION")
-    print("   Extracts ACTUAL embedded Remotion code from PDFs")
-    print("   No templates. 100% procedural. All generative.")
-    print("="*60 + "\n")
+    print("🚀 Ultimate Backend v3 - RemotionRoot Fix Edition")
     app.run(host='0.0.0.0', port=5000, debug=False)
