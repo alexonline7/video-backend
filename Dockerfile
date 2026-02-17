@@ -1,9 +1,13 @@
-FROM node:18-bullseye
+FROM ghcr.io/remotion-dev/base
 
-RUN apt-get update && \
-    apt-get install -y python3 python3-pip ffmpeg && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+USER root
+
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g remotion @remotion/cli react react-dom @remotion/renderer @remotion/bundler
 
 WORKDIR /app
 
