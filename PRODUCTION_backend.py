@@ -1,5 +1,3 @@
-PRODUCTION_backend.py
-
 from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
 from pypdf import PdfReader
