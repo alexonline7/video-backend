@@ -11,7 +11,11 @@ import time
 import re
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins=[
+    "https://pixel-script-press.lovable.app",
+    "http://localhost:3000",
+    "*"
+])
 
 TEMP_DIR = Path("temp_processing")
 TEMP_DIR.mkdir(exist_ok=True)
