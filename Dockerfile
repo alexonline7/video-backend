@@ -8,7 +8,7 @@ RUN apt-get update && \
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip3 install --break-system-packages -r requirements.txt
+RUN pip3 install -r requirements.txt
 
 COPY PRODUCTION_backend.py .
 
